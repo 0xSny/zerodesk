@@ -64,10 +64,11 @@ final class DiscoveryAndWoL: ObservableObject {
         bcastAddr.sin_addr = in_addr(s_addr: INADDR_BROADCAST)
 
         let payload = Array(discoveryMagic.utf8)
+        let payloadLen = payload.count
         _ = payload.withUnsafeBytes { ptr in
             withUnsafePointer(to: &bcastAddr) { addrPtr in
                 addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    sendto(fd, ptr.baseAddress, payload.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    sendto(fd, ptr.baseAddress, payloadLen, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
             }
         }
@@ -76,6 +77,7 @@ final class DiscoveryAndWoL: ObservableObject {
         var seen = Set<String>()
         let deadline = Date().addingTimeInterval(timeout)
         var recvBuf = [UInt8](repeating: 0, count: 2048)
+        let recvCapacity = recvBuf.count
 
         while Date() < deadline {
             var srcAddr = sockaddr_in()
@@ -83,7 +85,7 @@ final class DiscoveryAndWoL: ObservableObject {
             let n = recvBuf.withUnsafeMutableBytes { bufPtr in
                 withUnsafeMutablePointer(to: &srcAddr) { addrPtr in
                     addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                        recvfrom(fd, bufPtr.baseAddress, recvBuf.count, 0, sa, &srcLen)
+                        recvfrom(fd, bufPtr.baseAddress, recvCapacity, 0, sa, &srcLen)
                     }
                 }
             }
@@ -164,6 +166,7 @@ final class DiscoveryAndWoL: ObservableObject {
             targets.append("\(octets[0]).\(octets[1]).\(octets[2]).255")
         }
 
+        let packetLen = packet.count
         var sentAny = false
         for targetIP in targets {
             for port: UInt16 in [9, 7] {
@@ -176,11 +179,11 @@ final class DiscoveryAndWoL: ObservableObject {
                 let sent = packet.withUnsafeBytes { ptr in
                     withUnsafePointer(to: &addr) { addrPtr in
                         addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                            sendto(fd, ptr.baseAddress, packet.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                            sendto(fd, ptr.baseAddress, packetLen, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
                         }
                     }
                 }
-                if sent == packet.count {
+                if sent == packetLen {
                     sentAny = true
                 }
             }

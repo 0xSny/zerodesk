@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ZeroDesk">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0c10">
+<title>ZeroDesk 床头触控板</title>
+<style>
+  :root {
+    --bg: #0a0c10;
+    --panel: #141820;
+    --panel2: #1c222d;
+    --border: #2a3242;
+    --text: #eef2f8;
+    --muted: #8b95a8;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59,130,246,0.18);
+    --danger: #ef4444;
+    --ok: #22c55e;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100dvh; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  .app {
+    display: flex; flex-direction: column; height: 100dvh; width: 100%;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Top Video Viewport */
+  .video-zone {
+    position: relative; flex: 0 0 38dvh; background: #000;
+    overflow: hidden; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none;
+  }
+  video {
+    width: 100%; height: 100%; object-fit: contain;
+    transform-origin: center center; will-change: transform;
+    pointer-events: none;
+  }
+  .hud {
+    position: absolute; top: 8px; left: 8px; right: 8px;
+    display: flex; justify-content: space-between; align-items: center;
+    pointer-events: none; gap: 6px; z-index: 5;
+  }
+  .pill {
+    background: rgba(10,12,16,0.75); backdrop-filter: blur(8px);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 999px; padding: 4px 10px; font-size: 11px; color: var(--text);
+    display: inline-flex; align-items: center; gap: 6px; pointer-events: auto;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+  .dot.ok { background: var(--ok); }
+  .hud-btn {
+    background: rgba(28,34,45,0.85); color: var(--text); border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 10px; font-size: 11px; pointer-events: auto;
+  }
+
+  /* Middle Thumb Bar */
+  .toolbar {
+    flex: 0 0 auto; background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 8px 10px; display: flex; flex-direction: column; gap: 7px;
+  }
+  .input-row {
+    display: flex; gap: 6px; align-items: center;
+  }
+  .txt-input {
+    flex: 1; background: var(--panel2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 10px; padding: 8px 11px; font-size: 14px;
+    outline: none; user-select: text; -webkit-user-select: text; touch-action: auto;
+  }
+  .txt-input:focus { border-color: var(--accent); }
+  .btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 8px 12px; font-size: 13px; font-weight: 500;
+    cursor: pointer; white-space: nowrap;
+  }
+  .btn:active { background: var(--accent-soft); border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.danger { color: #fca5a5; border-color: rgba(239,68,68,0.45); }
+  .btn.active-blackout { background: #1e1b4b; border-color: #818cf8; color: #e0e7ff; box-shadow: 0 0 12px rgba(129,140,248,0.45); }
+
+  .scroll-row {
+    display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none;
+    touch-action: pan-x; padding-bottom: 1px;
+  }
+  .scroll-row::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: 0 0 auto; background: var(--panel2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 6px 10px; font-size: 12px;
+  }
+  .chip:active { background: var(--accent-soft); border-color: var(--accent); }
+
+  /* Bottom Touchpad */
+  .pad-wrap {
+    flex: 1 1 auto; position: relative; padding: 10px;
+    display: flex; flex-direction: column; gap: 8px; background: var(--bg);
+  }
+  .touchpad {
+    flex: 1; background: radial-gradient(circle at 50% 35%, #161b24 0%, #0f131a 100%);
+    border: 1px solid var(--border); border-radius: 18px;
+    position: relative; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; touch-action: none;
+    overflow: hidden;
+  }
+  .touchpad.dragging { border-color: var(--accent); box-shadow: inset 0 0 24px rgba(59,130,246,0.2); }
+  .pad-hint {
+    color: var(--muted); font-size: 12px; text-align: center; line-height: 1.6;
+    pointer-events: none; padding: 0 16px;
+  }
+  .mouse-btns {
+    display: grid; grid-template-columns: 1fr 0.55fr 1fr; gap: 8px; height: 42px;
+  }
+  .mbtn {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    color: var(--muted); font-size: 12px; font-weight: 500;
+  }
+  .mbtn:active { background: var(--accent-soft); color: var(--text); border-color: var(--accent); }
+
+  /* PIN Modal */
+  .modal {
+    position: fixed; inset: 0; background: rgba(6,8,12,0.92);
+    backdrop-filter: blur(10px); z-index: 50;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal.hidden { display: none; }
+  .card {
+    width: 100%; max-width: 340px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 18px; padding: 20px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .card h2 { margin: 0; font-size: 18px; }
+  .card p { margin: 0; font-size: 13px; color: var(--muted); }
+  .pin-input {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); border-radius: 12px; padding: 12px; font-size: 22px;
+    text-align: center; letter-spacing: 8px; outline: none;
+    user-select: text; -webkit-user-select: text; touch-action: auto;
+  }
+  .err { color: #f87171; font-size: 12px; min-height: 16px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="video-zone" id="videoZone">
+    <video id="remoteVideo" autoplay playsinline muted></video>
+    <div class="hud">
+      <div class="pill"><span class="dot" id="connDot"></span><span id="connText">未连接</span></div>
+      <div style="display:flex;gap:6px;">
+        <div class="pill" id="metricPill">-- ms · -- Mbps</div>
+        <button class="hud-btn" id="resetZoomBtn" style="display:none;">1x</button>
+        <button class="hud-btn" id="reconnBtn">重连</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <div class="input-row">
+      <input id="textInput" class="txt-input" type="text" placeholder="输入中文或英文直接上屏..." enterkeyhint="send">
+      <button id="sendTextBtn" class="btn primary">上屏</button>
+      <button id="blackoutBtn" class="btn">🌙 关屏黑幕</button>
+      <button id="muteBtn" class="btn">静音</button>
+      <button id="sleepBtn" class="btn danger">睡眠</button>
+    </div>
+    <div class="scroll-row">
+      <button class="chip" data-sys="vol_down">音量-</button>
+      <button class="chip" data-sys="vol_up">音量+</button>
+      <button class="chip" data-key="Esc">Esc</button>
+      <button class="chip" data-key="Enter">Enter</button>
+      <button class="chip" data-key="Backspace">退格</button>
+      <button class="chip" data-key="Tab">Tab</button>
+      <button class="chip" data-key="Win+D">桌面</button>
+      <button class="chip" data-key="Alt+Tab">切窗</button>
+      <button class="chip" data-key="Ctrl+C">复制</button>
+      <button class="chip" data-key="Ctrl+V">粘贴</button>
+      <button class="chip" data-key="Ctrl+Z">撤销</button>
+      <button class="chip" data-key="Ctrl+A">全选</button>
+      <button class="chip" data-key="Ctrl+W">关标签</button>
+      <button class="chip" data-key="Up">↑</button>
+      <button class="chip" data-key="Down">↓</button>
+      <button class="chip" data-key="Left">←</button>
+      <button class="chip" data-key="Right">→</button>
+    </div>
+  </div>
+
+  <div class="pad-wrap">
+    <div class="touchpad" id="touchpad">
+      <div class="pad-hint">
+        单指滑光标 · 轻点左键 · 双击按住拖拽<br>
+        双指轻点右键 · 双指上下滑滚轮<br>
+        上方画面支持双指捏合放大
+      </div>
+    </div>
+    <div class="mouse-btns">
+      <button class="mbtn" id="leftBtn">左键</button>
+      <button class="mbtn" id="midBtn">中键</button>
+      <button class="mbtn" id="rightBtn">右键</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="pinModal">
+  <div class="card">
+    <h2>ZeroDesk 局域网配对</h2>
+    <p>请输入电脑控制台显示的 6 位 PIN 码（本地记住免重复输入）</p>
+    <input id="pinInput" class="pin-input" type="tel" inputmode="numeric" maxlength="6" placeholder="••••••">
+    <div class="err" id="pinErr"></div>
+    <button id="connectBtn" class="btn primary" style="width:100%;padding:12px;">立即连接桌面</button>
+    <button id="forgetPinBtn" class="btn" style="width:100%;font-size:12px;color:var(--muted);">清除本地 PIN 缓存</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const LS_PIN = "zerodesk_pin_v1";
+  const videoEl = document.getElementById("remoteVideo");
+  const videoZone = document.getElementById("videoZone");
+  const touchpad = document.getElementById("touchpad");
+  const connDot = document.getElementById("connDot");
+  const connText = document.getElementById("connText");
+  const metricPill = document.getElementById("metricPill");
+  const pinModal = document.getElementById("pinModal");
+  const pinInput = document.getElementById("pinInput");
+  const pinErr = document.getElementById("pinErr");
+  const resetZoomBtn = document.getElementById("resetZoomBtn");
+  const blackoutBtn = document.getElementById("blackoutBtn");
+
+  function updateBlackoutUI(enabled) {
+    blackoutBtn.classList.toggle("active-blackout", !!enabled);
+    blackoutBtn.textContent = enabled ? "🌙 黑幕已开" : "🌙 关屏黑幕";
+  }
+
+  let pc = null;
+  let dc = null;
+  let statsTimer = null;
+  let pingTimer = null;
+  let lastBytes = 0;
+  let lastStatsAt = 0;
+  let lastRttMs = "--";
+
+  function sendCtrl(obj) {
+    if (dc && dc.readyState === "open") {
+      dc.send(JSON.stringify(obj));
+    }
+  }
+
+  function setStatus(ok, text) {
+    connDot.classList.toggle("ok", ok);
+    connText.textContent = text;
+  }
+
+  async function connectWithPin(pin) {
+    pinErr.textContent = "";
+    if (!/^\d{6}$/.test(pin)) {
+      pinErr.textContent = "请输入 6 位数字 PIN 码";
+      return;
+    }
+    if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+    clearInterval(statsTimer); clearInterval(pingTimer);
+
+    setStatus(false, "握手中...");
+    pc = new RTCPeerConnection({ iceServers: [] });
+    pc.addTransceiver("video", { direction: "recvonly" });
+
+    dc = pc.createDataChannel("control", { ordered: true });
+    dc.onopen = () => {
+      sendCtrl({ type: "request_idr" });
+      pingTimer = setInterval(() => {
+        sendCtrl({ type: "ping", ts: performance.now() });
+      }, 1500);
+    };
+    dc.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "pong" && typeof msg.ts === "number") {
+          lastRttMs = Math.max(1, Math.round(performance.now() - msg.ts));
+        } else if (msg.type === "blackout_state") {
+          updateBlackoutUI(msg.enabled);
+        }
+      } catch (_) {}
+    };
+
+    pc.ontrack = (ev) => {
+      if (ev.streams && ev.streams[0]) {
+        videoEl.srcObject = ev.streams[0];
+      } else {
+        const ms = new MediaStream();
+        ms.addTrack(ev.track);
+        videoEl.srcObject = ms;
+      }
+      videoEl.play().catch(() => {});
+    };
+
+    pc.onconnectionstatechange = () => {
+      const st = pc.connectionState;
+      if (st === "connected") {
+        setStatus(true, "已直连");
+        pinModal.classList.add("hidden");
+        localStorage.setItem(LS_PIN, pin);
+      } else if (st === "failed" || st === "disconnected" || st === "closed") {
+        setStatus(false, st === "disconnected" ? "重连中" : "已断开");
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const resp = await fetch("/api/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, sdp: offer.sdp, type: offer.type })
+    });
+
+    if (resp.status === 401) {
+      pinModal.classList.remove("hidden");
+      pinErr.textContent = "PIN 码错误，请核对电脑端控制台";
+      setStatus(false, "PIN 错误");
+      localStorage.removeItem(LS_PIN);
+      return;
+    }
+    if (!resp.ok) {
+      const msg = await resp.text();
+      pinErr.textContent = "握手失败: " + msg;
+      setStatus(false, "连接失败");
+      return;
+    }
+
+    const ans = await resp.json();
+    await pc.setRemoteDescription({ type: ans.type || "answer", sdp: ans.sdp });
+    pinModal.classList.add("hidden");
+    localStorage.setItem(LS_PIN, pin);
+
+    lastBytes = 0; lastStatsAt = performance.now();
+    statsTimer = setInterval(async () => {
+      if (!pc) return;
+      const stats = await pc.getStats();
+      stats.forEach((rep) => {
+        if (rep.type === "inbound-rtp" && rep.kind === "video") {
+          const now = performance.now();
+          if (lastStatsAt > 0 && now > lastStatsAt) {
+            const dt = (now - lastStatsAt) / 1000;
+            const mbps = (((rep.bytesReceived - lastBytes) * 8) / dt / 1e6).toFixed(1);
+            const fps = rep.framesPerSecond ? Math.round(rep.framesPerSecond) : "--";
+            metricPill.textContent = `${lastRttMs}ms · ${fps}fps · ${mbps}Mbps`;
+          }
+          lastBytes = rep.bytesReceived;
+          lastStatsAt = now;
+        }
+      });
+    }, 1000);
+  }
+
+  // Video pinch-zoom & pan
+  let vScale = 1, vPanX = 0, vPanY = 0;
+  let vPinchStartDist = 0, vPinchStartScale = 1;
+  let vPanLastX = 0, vPanLastY = 0;
+  function applyVideoTransform() {
+    if (vScale <= 1.02) {
+      vScale = 1; vPanX = 0; vPanY = 0;
+      resetZoomBtn.style.display = "none";
+    } else {
+      resetZoomBtn.style.display = "inline-block";
+      resetZoomBtn.textContent = `${vScale.toFixed(1)}x`;
+    }
+    videoEl.style.transform = `translate(${vPanX}px, ${vPanY}px) scale(${vScale})`;
+  }
+  resetZoomBtn.onclick = () => { vScale = 1; applyVideoTransform(); };
+  videoZone.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      vPinchStartDist = Math.hypot(dx, dy);
+      vPinchStartScale = vScale;
+    } else if (e.touches.length === 1 && vScale > 1) {
+      vPanLastX = e.touches[0].clientX;
+      vPanLastY = e.touches[0].clientY;
+    }
+  }, { passive: true });
+  videoZone.addEventListener("touchmove", (e) => {
+    if (e.touches.length === 2 && vPinchStartDist > 0) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.hypot(dx, dy);
+      vScale = Math.min(4, Math.max(1, vPinchStartScale * (dist / vPinchStartDist)));
+      applyVideoTransform();
+    } else if (e.touches.length === 1 && vScale > 1) {
+      vPanX += e.touches[0].clientX - vPanLastX;
+      vPanY += e.touches[0].clientY - vPanLastY;
+      vPanLastX = e.touches[0].clientX;
+      vPanLastY = e.touches[0].clientY;
+      applyVideoTransform();
+    }
+  }, { passive: true });
+
+  // Touchpad relative cursor, tap, double-tap-drag, 2-finger right-click & scroll
+  let activeTouches = new Map();
+  let startTime = 0, maxFingers = 0, totalMoved = 0;
+  let lastTapTime = 0, isDragging = false;
+  let accumX = 0, accumY = 0, accumScrollY = 0;
+
+  function sendMoveAccum() {
+    const dx = Math.trunc(accumX);
+    const dy = Math.trunc(accumY);
+    if (dx !== 0 || dy !== 0) {
+      accumX -= dx; accumY -= dy;
+      sendCtrl({ type: "mouse_move", dx, dy });
+    }
+  }
+
+  touchpad.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    const now = performance.now();
+    if (activeTouches.size === 0) {
+      startTime = now; maxFingers = e.touches.length; totalMoved = 0;
+      if (e.touches.length === 1 && (now - lastTapTime) < 260) {
+        isDragging = true;
+        touchpad.classList.add("dragging");
+        sendCtrl({ type: "mouse_btn", button: "left", action: "down" });
+      }
+    } else {
+      maxFingers = Math.max(maxFingers, e.touches.length);
+    }
+    for (const t of e.changedTouches) {
+      activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY });
+    }
+  }, { passive: false });
+
+  touchpad.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1 && activeTouches.size === 1) {
+      const t = e.touches[0];
+      const prev = activeTouches.get(t.identifier);
+      if (prev) {
+        const rawDx = t.clientX - prev.x;
+        const rawDy = t.clientY - prev.y;
+        totalMoved += Math.hypot(rawDx, rawDy);
+        const speed = Math.hypot(rawDx, rawDy);
+        const gain = speed > 14 ? 2.1 : (speed > 5 ? 1.55 : 1.15);
+        accumX += rawDx * gain;
+        accumY += rawDy * gain;
+        sendMoveAccum();
+        prev.x = t.clientX; prev.y = t.clientY;
+      }
+    } else if (e.touches.length === 2) {
+      let sumDy = 0, count = 0;
+      for (const t of e.touches) {
+        const prev = activeTouches.get(t.identifier);
+        if (prev) {
+          const dy = t.clientY - prev.y;
+          totalMoved += Math.abs(dy);
+          sumDy += dy; count++;
+          prev.x = t.clientX; prev.y = t.clientY;
+        }
+      }
+      if (count > 0) {
+        accumScrollY += (sumDy / count) * 6;
+        const wheel = Math.trunc(accumScrollY);
+        if (Math.abs(wheel) >= 12) {
+          accumScrollY -= wheel;
+          sendCtrl({ type: "scroll", dy: wheel });
+        }
+      }
+    }
+  }, { passive: false });
+
+  touchpad.addEventListener("touchend", (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) activeTouches.delete(t.identifier);
+    if (activeTouches.size === 0) {
+      const dt = performance.now() - startTime;
+      if (isDragging) {
+        isDragging = false;
+        touchpad.classList.remove("dragging");
+        sendCtrl({ type: "mouse_btn", button: "left", action: "up" });
+      } else if (dt < 240 && totalMoved < 10) {
+        if (maxFingers === 1) {
+          sendCtrl({ type: "mouse_btn", button: "left", action: "click" });
+          lastTapTime = performance.now();
+        } else if (maxFingers === 2) {
+          sendCtrl({ type: "mouse_btn", button: "right", action: "click" });
+        }
+      }
+    }
+  }, { passive: false });
+
+  // Desktop browser pointer fallback for testing touchpad with a mouse
+  let mouseDown = false, pmX = 0, pmY = 0, pmMoved = 0;
+  touchpad.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch") return;
+    mouseDown = true; pmX = e.clientX; pmY = e.clientY; pmMoved = 0;
+    touchpad.setPointerCapture(e.pointerId);
+  });
+  touchpad.addEventListener("pointermove", (e) => {
+    if (!mouseDown || e.pointerType === "touch") return;
+    const dx = Math.round((e.clientX - pmX) * 1.6);
+    const dy = Math.round((e.clientY - pmY) * 1.6);
+    pmMoved += Math.hypot(dx, dy);
+    pmX = e.clientX; pmY = e.clientY;
+    if (dx || dy) sendCtrl({ type: "mouse_move", dx, dy });
+  });
+  touchpad.addEventListener("pointerup", (e) => {
+    if (e.pointerType === "touch") return;
+    if (mouseDown && pmMoved < 6) sendCtrl({ type: "mouse_btn", button: "left", action: "click" });
+    mouseDown = false;
+  });
+
+  // Physical mouse buttons
+  document.getElementById("leftBtn").onclick = () => sendCtrl({ type: "mouse_btn", button: "left", action: "click" });
+  document.getElementById("midBtn").onclick = () => sendCtrl({ type: "mouse_btn", button: "middle", action: "click" });
+  document.getElementById("rightBtn").onclick = () => sendCtrl({ type: "mouse_btn", button: "right", action: "click" });
+
+  // Text injection
+  const textInput = document.getElementById("textInput");
+  function doSendText() {
+    const val = textInput.value;
+    if (!val) return;
+    sendCtrl({ type: "text", text: val });
+    textInput.value = "";
+  }
+  document.getElementById("sendTextBtn").onclick = doSendText;
+  textInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); doSendText(); }
+  });
+
+  // System & shortcut buttons
+  blackoutBtn.onclick = () => sendCtrl({ type: "blackout", action: "toggle" });
+  document.getElementById("muteBtn").onclick = () => sendCtrl({ type: "vol_mute" });
+  document.getElementById("sleepBtn").onclick = () => {
+    if (confirm("确认让电脑立即进入睡眠状态？")) sendCtrl({ type: "sleep" });
+  };
+  document.querySelectorAll("[data-key]").forEach((el) => {
+    el.onclick = () => sendCtrl({ type: "shortcut", key: el.dataset.key });
+  });
+  document.querySelectorAll("[data-sys]").forEach((el) => {
+    el.onclick = () => sendCtrl({ type: el.dataset.sys });
+  });
+
+  // Connect & saved PIN
+  document.getElementById("connectBtn").onclick = () => connectWithPin(pinInput.value.trim());
+  document.getElementById("reconnBtn").onclick = () => {
+    const saved = localStorage.getItem(LS_PIN) || pinInput.value.trim();
+    if (saved) connectWithPin(saved); else pinModal.classList.remove("hidden");
+  };
+  document.getElementById("forgetPinBtn").onclick = () => {
+    localStorage.removeItem(LS_PIN);
+    pinInput.value = "";
+    pinErr.textContent = "已清除本地 PIN 缓存";
+  };
+
+  const savedPin = localStorage.getItem(LS_PIN);
+  if (savedPin && /^\d{6}$/.test(savedPin)) {
+    pinInput.value = savedPin;
+    connectWithPin(savedPin).catch(() => {});
+  }
+})();
+</script>
+</body>
+</html>

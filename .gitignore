@@ -1,0 +1,17 @@
+# Build & dependency caches
+.build_cache/
+.pkg_cache/
+ios-client/.xcode_build/
+ios-client/ZeroDesk.xcodeproj/
+
+# Sensitive local runtime config (PIN / MAC) & logs / reports
+data/
+logs/
+reports/
+给经理审查*.txt
+
+# Compiled binaries & packages
+*.exe
+*.ipa
+*.app
+.DS_Store

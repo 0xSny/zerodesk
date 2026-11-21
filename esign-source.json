@@ -1,0 +1,19 @@
+{
+  "name": "ZeroDesk 局域网床头远控",
+  "identifier": "com.zerodesk.bedside.source",
+  "sourceURL": "https://raw.githubusercontent.com/0xSny/zerodesk/main/esign-source.json",
+  "apps": [
+    {
+      "name": "ZeroDesk",
+      "bundleIdentifier": "com.zerodesk.bedside",
+      "developerName": "ZeroDesk",
+      "version": "1.0.0",
+      "versionDate": "2026-11-21T08:30:00+08:00",
+      "versionDescription": "纯局域网高速桌面串流与床头触控板 (VideoToolbox 60fps + 多点触控板 + 物理黑幕)",
+      "downloadURL": "https://github.com/0xSny/zerodesk/releases/download/latest/ZeroDesk-unsigned.ipa",
+      "localizedDescription": "ZeroDesk 原生 iOS 床头远控客户端：支持 UDP 自动发现、单次 WebRTC 极速直连、VideoToolbox 硬件解码、多点触控板及 Wake-on-LAN。",
+      "iconURL": "https://raw.githubusercontent.com/0xSny/zerodesk/main/ios-client/Sources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "size": 15000000
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+name: Build ZeroDesk Unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ios-client/**'
+      - '.github/workflows/build-ios-ipa.yml'
+      - 'esign-source.json'
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Inspect Xcode toolchain
+        run: |
+          xcode-select -p
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project and build unsigned IPA
+        working-directory: ios-client
+        run: |
+          chmod +x build_unsigned_ipa.sh
+          ./build_unsigned_ipa.sh
+
+      - name: Upload ZeroDesk-unsigned.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeroDesk-unsigned-ipa
+          path: ios-client/ZeroDesk-unsigned.ipa
+          retention-days: 30
+
+      - name: Publish ZeroDesk-unsigned.ipa and ESign source to latest Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IPA_SIZE=$(stat -f%z ios-client/ZeroDesk-unsigned.ipa)
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          python3 -c "import json; d=json.load(open('esign-source.json','r',encoding='utf-8')); d['apps'][0]['size']=int('${IPA_SIZE}'); d['apps'][0]['versionDate']='${BUILD_TIME}'; json.dump(d,open('esign-source.json','w',encoding='utf-8'),ensure_ascii=False,indent=2)"
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest ios-client/ZeroDesk-unsigned.ipa esign-source.json --clobber
+          else
+            gh release create latest ios-client/ZeroDesk-unsigned.ipa esign-source.json \
+              --title "ZeroDesk iOS Latest Build" \
+              --notes "Automated unsigned IPA build for ESign / TrollStore / AltStore / Sideloadly."
+          fi

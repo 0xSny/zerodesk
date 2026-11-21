@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Darwin
 
 struct DiscoveredHost: Identifiable, Codable, Equatable {

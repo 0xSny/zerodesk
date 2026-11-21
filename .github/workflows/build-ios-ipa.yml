@@ -30,7 +30,19 @@ jobs:
         working-directory: ios-client
         run: |
           chmod +x build_unsigned_ipa.sh
-          ./build_unsigned_ipa.sh
+          set +e
+          ./build_unsigned_ipa.sh 2>&1 | tee xcodebuild.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "### xcodebuild failure tail" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 80 xcodebuild.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            grep -E "error:|fatal error:|BUILD FAILED" xcodebuild.log | head -n 15 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit "$rc"
+          fi
 
       - name: Upload ZeroDesk-unsigned.ipa artifact
         uses: actions/upload-artifact@v4

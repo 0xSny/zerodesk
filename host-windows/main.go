@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,11 +28,14 @@ import (
 
 func main() {
 	trayMode := flag.Bool("tray", false, "hide console window and run in Windows system tray")
+	httpPortFlag := flag.Int("http-port", 0, "override HTTP port (temporary, not saved to config.json)")
+	discPortFlag := flag.Int("disc-port", 0, "override UDP discovery port (temporary, not saved to config.json)")
+	verifyCursor := flag.Bool("verify-cursor", false, "run 10-frame NVENC cursor pixel verification and exit")
 	benchFrames := flag.Int("bench-frames", 0, "capture and encode N frames on startup for benchmark telemetry")
 	benchExit := flag.Bool("bench-exit", false, "exit after benchmark completes")
 	flag.Parse()
 
-	if *trayMode {
+	if *trayMode && !*verifyCursor {
 		system_ctrl.HideConsoleWindow()
 	}
 	capture.InitDPIAwareness()
@@ -47,6 +51,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
+	if *httpPortFlag > 0 {
+		cfg.HTTPPort = *httpPortFlag
+	}
+	if *discPortFlag > 0 {
+		cfg.DiscoveryPort = *discPortFlag
+	}
 
 	logDir := filepath.Join(baseDir, "logs")
 	log, err := logger.NewRollingLogger(logDir, "zerodesk-host.log", cfg.LogMaxBytes, cfg.LogMaxFiles)
@@ -55,6 +65,15 @@ func main() {
 		os.Exit(1)
 	}
 	defer log.Close()
+
+	if *verifyCursor {
+		if err := runVerifyCursor(cfg, log); err != nil {
+			log.Errorf("VERIFY_CURSOR_FAILED: %v", err)
+			fmt.Fprintf(os.Stderr, "VERIFY_CURSOR_FAILED: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	lanIPs, primaryIP, primaryMAC := lan_rtc.GetPrimaryLANInfo(cfg.FilterVirtualNICs)
 	if primaryMAC != "" && cfg.MacAddress != primaryMAC {
@@ -115,13 +134,8 @@ func main() {
 		benchRemaining.Store(int32(*benchFrames))
 	}
 
-	pipelineReady := make(chan error, 1)
-	go runCaptureEncodePipeline(ctx, cfg, log, rtcSrv, idrReqCh, &benchRemaining, *benchExit, cancel, pipelineReady)
-
-	if err := <-pipelineReady; err != nil {
-		log.Errorf("Capture/Encode pipeline startup failed: %v", err)
-		os.Exit(1)
-	}
+	var captureReady atomic.Bool
+	go runCaptureEncodePipeline(ctx, cfg, log, rtcSrv, idrReqCh, &benchRemaining, *benchExit, &captureReady, cancel)
 
 	if *trayMode {
 		tray, tErr := system_ctrl.NewTrayController(system_ctrl.TrayConfig{
@@ -205,14 +219,72 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": blackout.IsEnabled()})
 	})
+	hostname, _ := os.Hostname()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		ips, pIP, pMAC := lan_rtc.GetPrimaryLANInfo(cfg.FilterVirtualNICs)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","service":"zerodesk-host","stage":2}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":         "ok",
+			"service":        "zerodesk-host",
+			"version":        "1.0.0-stage3.2",
+			"stage":          3,
+			"hostname":       hostname,
+			"primary_ip":     pIP,
+			"ips":            ips,
+			"mac_address":    pMAC,
+			"http_port":      cfg.HTTPPort,
+			"discovery_port": cfg.DiscoveryPort,
+			"capture_ready":  captureReady.Load(),
+		})
+	})
+	mux.HandleFunc("/api/admin/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		host, _, splitErr := net.SplitHostPort(r.RemoteAddr)
+		if splitErr != nil {
+			host = r.RemoteAddr
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			http.Error(w, `{"error":"loopback only"}`, http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Pin string `json:"pin"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(req.Pin), []byte(cfg.PinCode)) != 1 {
+			http.Error(w, `{"error":"invalid pin"}`, http.StatusUnauthorized)
+			return
+		}
+		log.Infof("Graceful shutdown requested via local /api/admin/shutdown")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"shutting_down"}`))
+		go func() {
+			time.Sleep(30 * time.Millisecond)
+			cancel()
+		}()
+	})
+
+	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		mux.ServeHTTP(w, r)
 	})
 
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler:           mux,
+		Handler:           corsHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -249,6 +321,68 @@ func initBestEncoder(capturer *capture.DXGICapturer, cfg config.Config, log *log
 	return mf, nil, nil
 }
 
+func runVerifyCursor(cfg config.Config, log *logger.RollingLogger) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	capturer, err := capture.NewDXGICapturer()
+	if err != nil {
+		return fmt.Errorf("DXGI init: %w", err)
+	}
+	defer capturer.Close()
+
+	enc, texEnc, err := initBestEncoder(capturer, cfg, log)
+	if err != nil {
+		return fmt.Errorf("encoder init: %w", err)
+	}
+	defer enc.Close()
+
+	var totalMs float64
+	var lastAUBytes int
+	for frame := 1; frame <= 10; frame++ {
+		t0 := time.Now()
+		tex, w, _, _, capErr := capturer.AcquireGPUFrame(16, true)
+		if capErr != nil {
+			return fmt.Errorf("frame %d AcquireGPUFrame failed: %w", frame, capErr)
+		}
+		var encoded encoder.EncodedFrame
+		var encErr error
+		if texEnc != nil {
+			encoded, encErr = texEnc.EncodeTexture(tex, frame == 1)
+		} else {
+			bgra, _, _, rErr := capturer.ReadComposedToCPU()
+			if rErr != nil {
+				return fmt.Errorf("frame %d ReadComposedToCPU failed: %w", frame, rErr)
+			}
+			encoded, encErr = enc.Encode(bgra, w*4, frame == 1)
+		}
+		if encErr != nil {
+			return fmt.Errorf("frame %d encode failed: %w", frame, encErr)
+		}
+		frameMs := float64(time.Since(t0).Microseconds()) / 1000.0
+		totalMs = frameMs
+		lastAUBytes = len(encoded.Data)
+		if lastAUBytes == 0 {
+			return fmt.Errorf("frame %d produced empty H.264 output", frame)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cx, cy, diffPixels, err := capturer.VerifyCursorDiffPixels()
+	if err != nil {
+		return fmt.Errorf("VerifyCursorDiffPixels failed: %w", err)
+	}
+	composeUs := float64(capturer.LastComposeDuration().Microseconds())
+	msg := fmt.Sprintf("VERIFY_CURSOR_PASS frame=10 encoder=%q cursor_pos=(%d,%d) diff_pixels=%d compose_us=%.1f frame10_total_ms=%.2f last_au_bytes=%d",
+		enc.Name(), cx, cy, diffPixels, composeUs, totalMs, lastAUBytes)
+	fmt.Println(msg)
+	log.Infof("%s", msg)
+	if diffPixels <= 80 {
+		return fmt.Errorf("diff_pixels=%d <= 80 threshold", diffPixels)
+	}
+	return nil
+}
+
 func runCaptureEncodePipeline(
 	ctx context.Context,
 	cfg config.Config,
@@ -257,30 +391,74 @@ func runCaptureEncodePipeline(
 	idrReqCh chan struct{},
 	benchRemaining *atomic.Int32,
 	benchExit bool,
+	captureReady *atomic.Bool,
 	cancelApp context.CancelFunc,
-	readyCh chan<- error,
 ) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	capturer, err := capture.NewDXGICapturer()
-	if err != nil {
-		readyCh <- fmt.Errorf("DXGI init: %w", err)
-		return
-	}
-	defer capturer.Close()
+	var (
+		capturer  *capture.DXGICapturer
+		enc       encoder.VideoEncoder
+		texEnc    encoder.TextureEncoder
+		lastLogAt time.Time
+	)
 
-	enc, texEnc, err := initBestEncoder(capturer, cfg, log)
-	if err != nil {
-		readyCh <- fmt.Errorf("encoder init: %w", err)
-		return
+	initPipeline := func() bool {
+		if enc != nil {
+			_ = enc.Close()
+			enc = nil
+			texEnc = nil
+		}
+		if capturer != nil {
+			capturer.Close()
+			capturer = nil
+		}
+		c, err := capture.NewDXGICapturer()
+		if err != nil {
+			captureReady.Store(false)
+			if time.Since(lastLogAt) > 15*time.Second {
+				log.Warnf("DXGI not ready yet (will auto-retry): %v", err)
+				lastLogAt = time.Now()
+			}
+			return false
+		}
+		e, te, err := initBestEncoder(c, cfg, log)
+		if err != nil {
+			c.Close()
+			captureReady.Store(false)
+			if time.Since(lastLogAt) > 15*time.Second {
+				log.Warnf("Encoder init retry pending: %v", err)
+				lastLogAt = time.Now()
+			}
+			return false
+		}
+		capturer = c
+		enc = e
+		texEnc = te
+		captureReady.Store(true)
+		rtcSrv.SetScreenSize(capturer.Width, capturer.Height)
+		log.Infof("DXGI + %s initialized (%dx%d @ %dfps, %dkbps, zero_copy=%v)",
+			enc.Name(), capturer.Width, capturer.Height, cfg.TargetFPS, cfg.BitrateKbps, texEnc != nil)
+		return true
 	}
-	defer enc.Close()
 
-	rtcSrv.SetScreenSize(capturer.Width, capturer.Height)
-	log.Infof("DXGI + %s initialized (%dx%d @ %dfps, %dkbps, zero_copy=%v)",
-		enc.Name(), capturer.Width, capturer.Height, cfg.TargetFPS, cfg.BitrateKbps, texEnc != nil)
-	readyCh <- nil
+	defer func() {
+		if enc != nil {
+			_ = enc.Close()
+		}
+		if capturer != nil {
+			capturer.Close()
+		}
+	}()
+
+	for !initPipeline() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
 
 	frameInterval := time.Second / time.Duration(cfg.TargetFPS)
 	timeoutMs := uint32(16)
@@ -312,12 +490,24 @@ func runCaptureEncodePipeline(
 			return
 		}
 
+		if capturer == nil || enc == nil {
+			if !initPipeline() {
+				time.Sleep(1500 * time.Millisecond)
+				continue
+			}
+			prevW, prevH = capturer.Width, capturer.Height
+		}
+
 		benchLeft := benchRemaining.Load()
 		activePeers := rtcSrv.ActivePeerCount()
 
 		if activePeers == 0 && benchLeft <= 0 {
 			time.Sleep(50 * time.Millisecond)
 			continue
+		}
+
+		if activePeers > 0 {
+			capture.WakeDisplay()
 		}
 
 		forceIDR := false
@@ -338,21 +528,12 @@ func runCaptureEncodePipeline(
 		capDur := time.Since(frameStart)
 
 		if errors.Is(capErr, capture.ErrAccessLost) {
-			log.Warnf("DXGI_ERROR_ACCESS_LOST detected (mode/UAC change), reinitializing pipeline...")
-			enc.Close()
-			if rErr := capturer.Reinit(); rErr != nil {
-				log.Warnf("DXGI reinit retry pending: %v", rErr)
-				time.Sleep(150 * time.Millisecond)
+			log.Warnf("DXGI access/state lost (mode/UAC/sleep change), reinitializing pipeline...")
+			captureReady.Store(false)
+			if !initPipeline() {
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			newEnc, newTexEnc, eErr := initBestEncoder(capturer, cfg, log)
-			if eErr != nil {
-				log.Errorf("Encoder reinit failed: %v", eErr)
-				time.Sleep(150 * time.Millisecond)
-				continue
-			}
-			enc = newEnc
-			texEnc = newTexEnc
 			if capturer.Width != prevW || capturer.Height != prevH {
 				prevW, prevH = capturer.Width, capturer.Height
 				rtcSrv.SetScreenSize(capturer.Width, capturer.Height)

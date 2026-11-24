@@ -55,6 +55,7 @@ struct BedsideControlView: View {
     @State private var showLandscapePad: Bool = false
     @State private var showPairingSheet: Bool = false
     @State private var showSleepConfirm: Bool = false
+    @State private var probeMessage: String = ""
 
     // Pinch-to-zoom & pan state for Metal video viewport
     @State private var zoomScale: CGFloat = 1.0
@@ -81,16 +82,18 @@ struct BedsideControlView: View {
             }
         }
         .onAppear {
-            discovery.discoverHosts()
-            if hostIP.isEmpty || pinCode.count != 6 {
+            discovery.discoverHosts(cachedIP: hostIP, httpPort: hostPort)
+            let cleanIP = hostIP.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanPin = pinCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleanIP.isEmpty || cleanPin.count != 6 {
                 showPairingSheet = true
             } else {
-                rtc.connect(host: hostIP, port: hostPort, pin: pinCode)
+                rtc.connect(host: cleanIP, port: hostPort, pin: cleanPin)
             }
         }
         .onChange(of: discovery.hosts) { hosts in
             if let first = hosts.first {
-                if hostIP.isEmpty {
+                if hostIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     hostIP = first.primaryIP
                     hostPort = first.httpPort
                 }
@@ -242,6 +245,58 @@ struct BedsideControlView: View {
                     }
                 }
 
+            if !rtc.isConnected {
+                VStack(spacing: 10) {
+                    if rtc.isConnecting {
+                        ProgressView()
+                            .tint(.white)
+                    }
+                    Text(rtc.statusText)
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+
+                    if !rtc.errorMessage.isEmpty {
+                        Text(rtc.errorMessage)
+                            .font(.caption2)
+                            .foregroundColor(Color(red: 1.0, green: 0.65, blue: 0.65))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 18)
+                    } else if !hostIP.isEmpty {
+                        Text("目标主机: \(hostIP):\(hostPort)")
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button("🔄 立即重连") {
+                            rtc.connect(host: hostIP, port: hostPort, pin: pinCode)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.blue)
+                        .disabled(hostIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pinCode.trimmingCharacters(in: .whitespacesAndNewlines).count != 6)
+
+                        Button("🔍 扫描/配对") {
+                            discovery.discoverHosts(cachedIP: hostIP, httpPort: hostPort)
+                            showPairingSheet = true
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+
+                        if !hostMAC.isEmpty {
+                            Button("⚡ 唤醒") {
+                                discovery.wakeComputer(mac: hostMAC, pcIP: hostIP, n1IP: n1IP, pin: pinCode)
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.orange)
+                        }
+                    }
+                    .font(.caption)
+                }
+                .padding(14)
+                .background(Color.black.opacity(0.65))
+                .cornerRadius(14)
+            }
+
             VStack {
                 HStack(spacing: 6) {
                     HStack(spacing: 5) {
@@ -279,6 +334,16 @@ struct BedsideControlView: View {
                     }
 
                     Button {
+                        rtc.connect(host: hostIP, port: hostPort, pin: pinCode)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.65))
+                    .clipShape(Capsule())
+
+                    Button {
                         toggleOrientation()
                     } label: {
                         Image(systemName: isLandscape ? "rectangle.portrait" : "rectangle.landscape")
@@ -289,6 +354,7 @@ struct BedsideControlView: View {
                     .clipShape(Capsule())
 
                     Button {
+                        discovery.discoverHosts(cachedIP: hostIP, httpPort: hostPort)
                         showPairingSheet = true
                     } label: {
                         Image(systemName: "gearshape.fill")
@@ -404,29 +470,44 @@ struct BedsideControlView: View {
     private var pairingSheet: some View {
         NavigationView {
             Form {
-                Section("局域网主机自动发现 (UDP 9528)") {
+                Section("局域网主机自动发现 (UDP + Wi-Fi 网段扫描)") {
                     Button {
-                        discovery.discoverHosts()
+                        discovery.discoverHosts(cachedIP: hostIP, httpPort: hostPort)
                     } label: {
                         HStack {
-                            Text(discovery.isScanning ? "正在扫描局域网..." : "重新扫描同 Wi-Fi 电脑")
+                            Text(discovery.isScanning ? "正在扫描同 Wi-Fi 电脑..." : "重新扫描同 Wi-Fi 电脑")
                             Spacer()
                             if discovery.isScanning { ProgressView() }
                         }
                     }
+
+                    if !discovery.scanStatusText.isEmpty {
+                        Text(discovery.scanStatusText)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
                     ForEach(discovery.hosts) { h in
                         Button {
                             hostIP = h.primaryIP
                             hostPort = h.httpPort
                             if !h.macAddress.isEmpty { hostMAC = h.macAddress }
+                            probeMessage = "已选中 \(h.hostname) (\(h.primaryIP):\(h.httpPort))"
                         } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("\(h.hostname) (\(h.primaryIP):\(h.httpPort))")
-                                    .foregroundColor(.primary)
-                                if !h.macAddress.isEmpty {
-                                    Text("MAC: \(h.macAddress)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(h.hostname) (\(h.primaryIP):\(h.httpPort))")
+                                        .foregroundColor(.primary)
+                                    if !h.macAddress.isEmpty {
+                                        Text("MAC: \(h.macAddress)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                if hostIP == h.primaryIP {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
                                 }
                             }
                         }
@@ -436,20 +517,39 @@ struct BedsideControlView: View {
                 Section("配对连接参数") {
                     TextField("电脑局域网 IP (如 192.168.1.7)", text: $hostIP)
                         .keyboardType(.decimalPad)
+                        .autocorrectionDisabled()
                     TextField("6 位配对 PIN 码", text: $pinCode)
                         .keyboardType(.numberPad)
                     TextField("电脑物理网卡 MAC (自动学习)", text: $hostMAC)
+                        .autocorrectionDisabled()
                     TextField("可选: N1 盒子 IP (留空则纯本机 WoL)", text: $n1IP)
                         .keyboardType(.decimalPad)
                 }
 
                 Section {
                     Button("立即连接桌面") {
+                        hostIP = hostIP.trimmingCharacters(in: .whitespacesAndNewlines)
+                        pinCode = pinCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                        hostMAC = hostMAC.trimmingCharacters(in: .whitespacesAndNewlines)
+                        n1IP = n1IP.trimmingCharacters(in: .whitespacesAndNewlines)
                         showPairingSheet = false
                         rtc.connect(host: hostIP, port: hostPort, pin: pinCode)
                     }
                     .frame(maxWidth: .infinity)
                     .foregroundColor(.blue)
+
+                    Button("测试网络连通性 (/api/health)") {
+                        probeMessage = "正在测试连通性..."
+                        Task {
+                            let res = await discovery.probeHost(ip: hostIP, port: hostPort)
+                            probeMessage = res.message
+                            if let h = res.host, !h.macAddress.isEmpty {
+                                hostMAC = h.macAddress
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .foregroundColor(.teal)
 
                     Button("⚡ 发送 Wake-on-LAN 唤醒电脑") {
                         discovery.wakeComputer(mac: hostMAC, pcIP: hostIP, n1IP: n1IP, pin: pinCode)
@@ -457,6 +557,11 @@ struct BedsideControlView: View {
                     .frame(maxWidth: .infinity)
                     .foregroundColor(.orange)
 
+                    if !probeMessage.isEmpty {
+                        Text(probeMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                     if !discovery.wakeStatusMessage.isEmpty {
                         Text(discovery.wakeStatusMessage)
                             .font(.caption)

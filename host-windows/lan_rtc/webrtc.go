@@ -16,6 +16,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
+	"zerodesk-host/capture"
 	"zerodesk-host/config"
 	"zerodesk-host/input"
 	"zerodesk-host/logger"
@@ -240,6 +241,7 @@ func (s *RTCServer) HandleConnect(w http.ResponseWriter, r *http.Request) {
 
 	var req ConnectRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		s.log.Warnf("Invalid /api/connect JSON from %s: %v", r.RemoteAddr, err)
 		http.Error(w, "invalid json payload", http.StatusBadRequest)
 		return
 	}
@@ -251,9 +253,13 @@ func (s *RTCServer) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.SDP == "" {
+		s.log.Warnf("Rejected /api/connect from %s: missing SDP", r.RemoteAddr)
 		http.Error(w, `{"error":"missing sdp"}`, http.StatusBadRequest)
 		return
 	}
+
+	// Ensure display & GPU duplication wake up if monitor was sleeping
+	capture.WakeDisplay()
 
 	// Pure LAN configuration: ICEServers MUST remain empty (zero STUN/TURN, zero external traffic)
 	pc, err := s.api.NewPeerConnection(webrtc.Configuration{

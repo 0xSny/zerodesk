@@ -298,8 +298,10 @@
       videoEl.play().catch(() => {});
     };
 
+    const curPC = pc;
     pc.onconnectionstatechange = () => {
-      const st = pc.connectionState;
+      if (pc !== curPC) return;
+      const st = curPC.connectionState;
       if (st === "connected") {
         setStatus(true, "已直连");
         pinModal.classList.add("hidden");
@@ -309,13 +311,26 @@
       }
     };
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    const offer = await curPC.createOffer();
+    await curPC.setLocalDescription(offer);
+
+    if (curPC.iceGatheringState !== "complete") {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 250);
+        curPC.addEventListener("icegatheringstatechange", () => {
+          if (curPC.iceGatheringState === "complete") {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+      });
+    }
+    const finalOffer = curPC.localDescription || offer;
 
     const resp = await fetch("/api/connect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, sdp: offer.sdp, type: offer.type })
+      body: JSON.stringify({ pin, sdp: finalOffer.sdp, type: finalOffer.type })
     });
 
     if (resp.status === 401) {
@@ -559,6 +574,12 @@
     pinInput.value = savedPin;
     connectWithPin(savedPin).catch(() => {});
   }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && (!pc || pc.connectionState !== "connected")) {
+      const p = localStorage.getItem(LS_PIN);
+      if (p && /^\d{6}$/.test(p)) connectWithPin(p).catch(() => {});
+    }
+  });
 })();
 </script>
 </body>

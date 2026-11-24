@@ -1,4 +1,44 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿function Stop-ZeroDeskHost([string]$RootDir) {
+    $cfgPath = Join-Path $RootDir "data\config.json"
+    $httpPort = 9527
+    $pin = ""
+    if (Test-Path -LiteralPath $cfgPath) {
+        try {
+            $cfg = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($cfg.http_port) { $httpPort = [int]$cfg.http_port }
+            if ($cfg.pin_code) { $pin = [string]$cfg.pin_code }
+        } catch {}
+    }
+
+    $running = Get-Process -Name 'zerodesk-host' -ErrorAction SilentlyContinue
+    if ($running -and $pin) {
+        try {
+            $body = (@{ pin = $pin } | ConvertTo-Json -Compress)
+            Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/admin/shutdown" -f $httpPort) -Method Post -ContentType "application/json" -Body $body -TimeoutSec 2 | Out-Null
+            for ($i = 0; $i -lt 10; $i++) {
+                Start-Sleep -Milliseconds 150
+                if (-not (Get-Process -Name 'zerodesk-host' -ErrorAction SilentlyContinue)) { break }
+            }
+        } catch {}
+    }
+
+    if (Get-Process -Name 'zerodesk-host' -ErrorAction SilentlyContinue) {
+        Get-Process -Name 'zerodesk-host' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 250
+    }
+
+    if (Get-Process -Name 'zerodesk-host' -ErrorAction SilentlyContinue) {
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) {
+            Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command `"Get-Process -Name 'zerodesk-host' -ErrorAction SilentlyContinue | Stop-Process -Force`"" -Verb RunAs -Wait
+            Start-Sleep -Milliseconds 300
+        }
+    }
+
+    $oldPattern = Join-Path $RootDir ".build_cache\*.old.exe"
+    Remove-Item -Path $oldPattern -Force -ErrorAction SilentlyContinue
+}
+$ErrorActionPreference = 'Stop'
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
@@ -41,9 +81,8 @@ $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interac
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName 'ZeroDesk-AutoStart' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 
-Write-Host "[3/3] 立即启动后台托盘服务并核验运行状态..."
-Get-Process -Name 'zerodesk-host' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 300
+Write-Host "[3/3] 立即重启后台托盘服务并核验运行状态..."
+Stop-ZeroDeskHost -RootDir $root
 Start-ScheduledTask -TaskName 'ZeroDesk-AutoStart'
 
 $alive = $null

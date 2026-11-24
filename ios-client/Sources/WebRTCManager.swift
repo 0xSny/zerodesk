@@ -27,6 +27,7 @@ private struct ConnectReply: Decodable {
 @MainActor
 final class WebRTCManager: NSObject, ObservableObject {
     @Published var isConnected: Bool = false
+    @Published var isConnecting: Bool = false
     @Published var statusText: String = "未连接"
     @Published var errorMessage: String = ""
     @Published var remoteVideoTrack: RTCVideoTrack?
@@ -48,6 +49,7 @@ final class WebRTCManager: NSObject, ObservableObject {
     private var activePort: Int = 9527
     private var activePin: String = ""
     private var gatheringWaiter: CheckedContinuation<Void, Never>?
+    private var connectAttemptToken: UUID = UUID()
 
     override init() {
         RTCInitializeSSL()
@@ -61,14 +63,18 @@ final class WebRTCManager: NSObject, ObservableObject {
         let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanPin = pin.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanHost.isEmpty, cleanPin.count == 6 else {
+            statusText = "参数未完整"
             errorMessage = "请填写有效的电脑局域网 IP 和 6 位 PIN 码"
             return
         }
 
         disconnect(resetTarget: false)
+        let token = UUID()
+        connectAttemptToken = token
         activeHost = cleanHost
-        activePort = port
+        activePort = port > 0 ? port : 9527
         activePin = cleanPin
+        isConnecting = true
         errorMessage = ""
         statusText = "握手中..."
 
@@ -79,6 +85,7 @@ final class WebRTCManager: NSObject, ObservableObject {
 
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
+            isConnecting = false
             statusText = "初始化失败"
             errorMessage = "无法创建 RTCPeerConnection"
             return
@@ -96,14 +103,13 @@ final class WebRTCManager: NSObject, ObservableObject {
             controlChannel = dc
         }
 
-        let offerConstraints = RTCMediaConstraints(
-            mandatoryConstraints: ["OfferToReceiveVideo": "true"],
-            optionalConstraints: nil
-        )
+        let offerConstraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         pc.offer(for: offerConstraints) { [weak self] sdp, err in
             guard let self else { return }
             if let err {
                 Task { @MainActor in
+                    guard self.connectAttemptToken == token else { return }
+                    self.isConnecting = false
                     self.statusText = "Offer 失败"
                     self.errorMessage = err.localizedDescription
                 }
@@ -113,18 +119,39 @@ final class WebRTCManager: NSObject, ObservableObject {
             pc.setLocalDescription(sdp) { setErr in
                 if let setErr {
                     Task { @MainActor in
+                        guard self.connectAttemptToken == token else { return }
+                        self.isConnecting = false
                         self.statusText = "信令错误"
                         self.errorMessage = setErr.localizedDescription
                     }
                     return
                 }
                 Task { @MainActor in
+                    guard self.connectAttemptToken == token, self.peerConnection === pc else { return }
                     await self.waitForLocalCandidates(pc: pc, timeoutMs: 250)
+                    guard self.connectAttemptToken == token, self.peerConnection === pc else { return }
                     let finalOffer = pc.localDescription ?? sdp
-                    await self.sendOfferToHost(sdp: finalOffer, host: cleanHost, port: port, pin: cleanPin, pc: pc)
+                    await self.sendOfferToHost(
+                        sdp: finalOffer,
+                        host: cleanHost,
+                        port: self.activePort,
+                        pin: cleanPin,
+                        pc: pc,
+                        token: token
+                    )
                 }
             }
         }
+    }
+
+    func reconnectNow() {
+        guard !activeHost.isEmpty, activePin.count == 6 else { return }
+        connect(host: activeHost, port: activePort, pin: activePin)
+    }
+
+    func reconnectIfNeeded() {
+        guard !isConnected, !isConnecting, !activeHost.isEmpty, activePin.count == 6 else { return }
+        connect(host: activeHost, port: activePort, pin: activePin)
     }
 
     private func waitForLocalCandidates(pc: RTCPeerConnection, timeoutMs: UInt64) async {
@@ -143,71 +170,116 @@ final class WebRTCManager: NSObject, ObservableObject {
         }
     }
 
-    private func sendOfferToHost(sdp: RTCSessionDescription, host: String, port: Int, pin: String, pc: RTCPeerConnection) async {
+    private func sendOfferToHost(
+        sdp: RTCSessionDescription,
+        host: String,
+        port: Int,
+        pin: String,
+        pc: RTCPeerConnection,
+        token: UUID
+    ) async {
         guard let url = URL(string: "http://\(host):\(port)/api/connect") else {
+            isConnecting = false
             statusText = "地址无效"
+            errorMessage = "地址格式错误: \(host):\(port)"
             return
         }
-        var req = URLRequest(url: url, timeoutInterval: 4.0)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONEncoder().encode(ConnectPayload(pin: pin, sdp: sdp.sdp, type: "offer"))
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse else {
-                statusText = "网络异常"
-                return
-            }
-            if http.statusCode == 401 {
-                statusText = "PIN 错误"
-                errorMessage = "PIN 码校验失败，请核对电脑端托盘或控制台显示的 6 位数字"
-                disconnect(resetTarget: false)
-                return
-            }
-            guard http.statusCode == 200 else {
-                statusText = "握手失败(\(http.statusCode))"
-                errorMessage = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
-                return
+        let payloadData = try? JSONEncoder().encode(ConnectPayload(pin: pin, sdp: sdp.sdp, type: "offer"))
+        var lastErr: Error?
+
+        // Retry transient Local Network permission / Wi-Fi wakeup errors up to 2 times
+        for attempt in 0..<3 {
+            guard connectAttemptToken == token, peerConnection === pc else { return }
+            if attempt > 0 {
+                statusText = "等待本地网络授权/重试(\(attempt))..."
+                try? await Task.sleep(nanoseconds: 850_000_000)
+                guard connectAttemptToken == token, peerConnection === pc else { return }
             }
 
-            let reply = try JSONDecoder().decode(ConnectReply.self, from: data)
-            if let w = reply.width, let h = reply.height, w > 0, h > 0 {
-                desktopSize = CGSize(width: w, height: h)
-            }
-            let answer = RTCSessionDescription(type: .answer, sdp: reply.sdp)
-            pc.setRemoteDescription(answer) { [weak self] err in
-                if let err {
-                    Task { @MainActor in
-                        self?.statusText = "SDP 异常"
-                        self?.errorMessage = err.localizedDescription
+            var req = URLRequest(url: url, timeoutInterval: 4.0)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = payloadData
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: req)
+                guard connectAttemptToken == token, peerConnection === pc else { return }
+                guard let http = response as? HTTPURLResponse else {
+                    isConnecting = false
+                    statusText = "网络异常"
+                    return
+                }
+                if http.statusCode == 401 {
+                    isConnecting = false
+                    statusText = "PIN 错误"
+                    errorMessage = "PIN 码校验失败，请核对电脑端托盘或 data\\config.json 中的 6 位数字"
+                    disconnect(resetTarget: false, preserveError: true)
+                    return
+                }
+                guard http.statusCode == 200 else {
+                    isConnecting = false
+                    statusText = "握手失败(\(http.statusCode))"
+                    errorMessage = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                    return
+                }
+
+                let reply = try JSONDecoder().decode(ConnectReply.self, from: data)
+                if let w = reply.width, let h = reply.height, w > 0, h > 0 {
+                    desktopSize = CGSize(width: w, height: h)
+                }
+                statusText = "ICE 连通中..."
+                let answer = RTCSessionDescription(type: .answer, sdp: reply.sdp)
+                pc.setRemoteDescription(answer) { [weak self] err in
+                    if let err {
+                        Task { @MainActor in
+                            guard let self, self.connectAttemptToken == token else { return }
+                            self.isConnecting = false
+                            self.statusText = "SDP 异常"
+                            self.errorMessage = err.localizedDescription
+                        }
                     }
                 }
+                return
+            } catch {
+                lastErr = error
             }
-        } catch {
-            statusText = "连接超时"
-            errorMessage = "无法连接到 \(host):\(port)（\(error.localizedDescription)）"
         }
+
+        guard connectAttemptToken == token, peerConnection === pc else { return }
+        isConnecting = false
+        statusText = "连接超时"
+        let desc = lastErr?.localizedDescription ?? "超时"
+        errorMessage = "无法连接到 \(host):\(port)（\(desc)）。请确认电脑已启动 ZeroDesk 且手机「设置 -> 隐私 -> 本地网络」已允许 ZeroDesk。"
     }
 
-    func reconnectIfNeeded() {
-        guard !isConnected, !activeHost.isEmpty, activePin.count == 6 else { return }
-        connect(host: activeHost, port: activePort, pin: activePin)
-    }
-
-    func disconnect(resetTarget: Bool = true) {
+    func disconnect(resetTarget: Bool = true, preserveError: Bool = false) {
+        connectAttemptToken = UUID()
+        if let pending = gatheringWaiter {
+            gatheringWaiter = nil
+            pending.resume()
+        }
         pingTimer?.invalidate()
         pingTimer = nil
         statsTimer?.invalidate()
         statsTimer = nil
+
+        controlChannel?.delegate = nil
         controlChannel?.close()
         controlChannel = nil
+
+        peerConnection?.delegate = nil
         peerConnection?.close()
         peerConnection = nil
+
         remoteVideoTrack = nil
         isConnected = false
+        isConnecting = false
         blackoutEnabled = false
-        statusText = "未连接"
+        if !preserveError {
+            statusText = "未连接"
+            errorMessage = ""
+        }
         if resetTarget {
             activeHost = ""
             activePin = ""
@@ -304,6 +376,7 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
         if let track = stream.videoTracks.first {
             Task { @MainActor in
+                guard self.peerConnection === peerConnection else { return }
                 self.remoteVideoTrack = track
             }
         }
@@ -314,9 +387,13 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
 
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         Task { @MainActor in
+            guard self.peerConnection === peerConnection else { return }
             switch newState {
+            case .checking:
+                self.statusText = "ICE 连通中..."
             case .connected, .completed:
                 self.isConnected = true
+                self.isConnecting = false
                 self.statusText = "已直连"
                 self.errorMessage = ""
                 self.sendControl(["type": "request_idr"])
@@ -324,8 +401,17 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
             case .disconnected:
                 self.isConnected = false
                 self.statusText = "重连中..."
-            case .failed, .closed:
+            case .failed:
                 self.isConnected = false
+                self.isConnecting = false
+                self.blackoutEnabled = false
+                self.statusText = "ICE 通道失败"
+                if self.errorMessage.isEmpty {
+                    self.errorMessage = "UDP 媒体通道建立失败，请检查同 Wi-Fi 连接或关闭 VPN 后重连"
+                }
+            case .closed:
+                self.isConnected = false
+                self.isConnecting = false
                 self.blackoutEnabled = false
                 self.statusText = "已断开"
             default:
@@ -337,6 +423,7 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
         if newState == .complete {
             Task { @MainActor in
+                guard self.peerConnection === peerConnection else { return }
                 if let pending = self.gatheringWaiter {
                     self.gatheringWaiter = nil
                     pending.resume()
@@ -344,12 +431,14 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
             }
         }
     }
+
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
 
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         dataChannel.delegate = self
         Task { @MainActor in
+            guard self.peerConnection === peerConnection else { return }
             self.controlChannel = dataChannel
         }
     }
@@ -357,6 +446,7 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd rtpReceiver: RTCRtpReceiver, streams mediaStreams: [RTCMediaStream]) {
         if let track = rtpReceiver.track as? RTCVideoTrack {
             Task { @MainActor in
+                guard self.peerConnection === peerConnection else { return }
                 self.remoteVideoTrack = track
             }
         }
@@ -367,6 +457,7 @@ extension WebRTCManager: RTCDataChannelDelegate {
     nonisolated func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         if dataChannel.readyState == .open {
             Task { @MainActor in
+                guard self.controlChannel === dataChannel else { return }
                 self.sendControl(["type": "request_idr"])
             }
         }
@@ -378,9 +469,10 @@ extension WebRTCManager: RTCDataChannelDelegate {
               let type = json["type"] as? String else { return }
 
         Task { @MainActor in
+            guard self.controlChannel === dataChannel else { return }
             switch type {
             case "pong":
-                if let ts = json["ts"] as? Int64 {
+                if let ts = (json["ts"] as? NSNumber)?.int64Value {
                     let nowMs = Int64(ProcessInfo.processInfo.systemUptime * 1000)
                     self.rttMs = max(1, Int(nowMs - ts))
                 }
